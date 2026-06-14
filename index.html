@@ -469,6 +469,8 @@ async function init(){
   renderAll();
   buildImport();
   buildSettings();
+  // Initialize Google Drive and restore session if available
+  await gdriveInit();
 }
 
 function renderAll(){
@@ -1928,79 +1930,85 @@ async function exportSQLiteBackup(){
   try{
     // Create tables matching Android "Day-to-Day Expenses" schema EXACTLY
     db2.run(`CREATE TABLE category_table (
-      category_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      category_name TEXT NOT NULL,
-      category_type TEXT DEFAULT 'default',
-      is_custom_category INTEGER DEFAULT 0
+      category_id INTEGER PRIMARY KEY,
+      category_name string,
+      category_type INT,
+      is_custom_category INT
     )`);
-    db2.run(`CREATE TABLE account (
-      account_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      account_identification TEXT DEFAULT '',
-      bank_details TEXT DEFAULT '',
-      account_color TEXT DEFAULT '#3b82f6',
-      account_balance INTEGER DEFAULT 0,
-      profile_id INTEGER DEFAULT 1,
-      FOREIGN KEY(profile_id) REFERENCES profile(profile_id)
-    )`);
-    db2.run(`CREATE TABLE transaction_table (
-      transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL,
-      name TEXT,
-      description TEXT,
-      amount INTEGER NOT NULL,
-      type INTEGER NOT NULL,
-      category_id INTEGER,
-      from_account INTEGER,
-      to_account INTEGER,
-      other_bank_indicator INTEGER DEFAULT 0,
-      FOREIGN KEY(category_id) REFERENCES category_table(category_id),
-      FOREIGN KEY(from_account) REFERENCES account(account_id),
-      FOREIGN KEY(to_account) REFERENCES account(account_id)
-    )`);
-    db2.run(`CREATE TABLE profile (
-      profile_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      profile_name TEXT DEFAULT 'Default',
-      profile_purpose TEXT DEFAULT '',
-      additional_information TEXT DEFAULT '',
-      profile_avathar TEXT DEFAULT '',
-      default_indicator INTEGER DEFAULT 1
-    )`);
-    db2.run(`INSERT INTO profile (profile_id, profile_name, default_indicator) VALUES (1, 'Default', 1)`);
 
-    // android_metadata table (required by Android SQLite)
+    db2.run(`CREATE TABLE account (
+      account_id INTEGER PRIMARY KEY,
+      account_identification string,
+      bank_details string,
+      profile_id INT,
+      account_balance bigint,
+      default_indicator string,
+      account_color string
+    )`);
+
+    db2.run(`CREATE TABLE transaction_table (
+      date String,
+      name string,
+      amount bigint,
+      category_id INTEGER,
+      description string,
+      from_account INT,
+      to_account INT,
+      other_bank_indicator string,
+      transaction_id INTEGER,
+      type INT,
+      PRIMARY KEY(date, transaction_id)
+    )`);
+
+    db2.run(`CREATE TABLE profile (
+      profile_id INTEGER PRIMARY KEY,
+      profile_name string,
+      profile_purpose string,
+      additional_information string,
+      default_indicator string,
+      profile_avathar string
+    )`);
+
+    // Insert default profile with 'y' for default_indicator
+    db2.run('INSERT INTO profile (profile_id, profile_name, profile_purpose, additional_information, default_indicator, profile_avathar) VALUES (?, ?, ?, ?, ?, ?)',
+      [1, 'Default', '', '', 'y', '']);
+
+    // android_metadata table
     db2.run(`CREATE TABLE android_metadata (locale TEXT)`);
     db2.run(`INSERT INTO android_metadata (locale) VALUES ('en_IN')`);
 
-    // notes table
+    // notes table - EXACTLY: date, text, _id
     db2.run(`CREATE TABLE notes (
-      notes_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      text TEXT,
-      profile_id INTEGER DEFAULT 1,
-      FOREIGN KEY(profile_id) REFERENCES profile(profile_id)
+      date string,
+      text string,
+      _id INT
     )`);
 
-    // cf_details table for cash flow tracking with profile_id
+    // cf_details table - EXACTLY with all columns
     db2.run(`CREATE TABLE cf_details (
-      cf_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      account_id INTEGER NOT NULL,
-      profile_id INTEGER DEFAULT 1,
-      date TEXT NOT NULL,
-      net INTEGER DEFAULT 0,
-      cf INTEGER DEFAULT 0,
-      total_credit INTEGER DEFAULT 0,
-      total_debit INTEGER DEFAULT 0,
-      FOREIGN KEY(account_id) REFERENCES account(account_id),
-      FOREIGN KEY(profile_id) REFERENCES profile(profile_id)
+      cf_id INTEGER PRIMARY KEY,
+      date String,
+      profile_id INTEGER,
+      account_id INTEGER,
+      net bigint,
+      cf bigint,
+      total_credit bigint,
+      total_debit bigint
     )`);
 
     // Triggers to maintain cf_details on transaction changes
     db2.run(`CREATE TRIGGER trigger_cf_update_on_insert AFTER INSERT ON transaction_table
     BEGIN
-      INSERT OR REPLACE INTO cf_details (account_id, profile_id, date, net, total_credit, total_debit)
+      INSERT OR REPLACE INTO cf_details (account_id, profile_id, date, net, cf, total_credit, total_debit)
       SELECT
         coalesce(new.from_account, new.to_account),
         1,
         substr(new.date, 1, 7),
+        coalesce((SELECT sum(case when type = 0 then amount else -amount end)
+          FROM transaction_table t
+          WHERE t.date LIKE substr(new.date, 1, 7) || '%'
+          AND (from_account = coalesce(new.from_account, new.to_account)
+            OR to_account = coalesce(new.from_account, new.to_account))), 0),
         coalesce((SELECT sum(case when type = 0 then amount else -amount end)
           FROM transaction_table t
           WHERE t.date LIKE substr(new.date, 1, 7) || '%'
@@ -2020,6 +2028,11 @@ async function exportSQLiteBackup(){
     BEGIN
       UPDATE cf_details SET
         net = coalesce((SELECT sum(case when type = 0 then amount else -amount end)
+          FROM transaction_table t
+          WHERE t.date LIKE substr(old.date, 1, 7) || '%'
+          AND (from_account = coalesce(old.from_account, old.to_account)
+            OR to_account = coalesce(old.from_account, old.to_account))), 0),
+        cf = coalesce((SELECT sum(case when type = 0 then amount else -amount end)
           FROM transaction_table t
           WHERE t.date LIKE substr(old.date, 1, 7) || '%'
           AND (from_account = coalesce(old.from_account, old.to_account)
@@ -2046,6 +2059,11 @@ async function exportSQLiteBackup(){
           WHERE t.date LIKE substr(old.date, 1, 7) || '%'
           AND (from_account = coalesce(old.from_account, old.to_account)
             OR to_account = coalesce(old.from_account, old.to_account))), 0),
+        cf = coalesce((SELECT sum(case when type = 0 then amount else -amount end)
+          FROM transaction_table t
+          WHERE t.date LIKE substr(old.date, 1, 7) || '%'
+          AND (from_account = coalesce(old.from_account, old.to_account)
+            OR to_account = coalesce(old.from_account, old.to_account))), 0),
         total_credit = coalesce((SELECT sum(case when type = 0 then amount else 0 end)
           FROM transaction_table t
           WHERE t.date LIKE substr(old.date, 1, 7) || '%'
@@ -2057,11 +2075,16 @@ async function exportSQLiteBackup(){
       WHERE account_id = coalesce(old.from_account, old.to_account)
         AND profile_id = 1
         AND date = substr(old.date, 1, 7);
-      INSERT OR REPLACE INTO cf_details (account_id, profile_id, date, net, total_credit, total_debit)
+      INSERT OR REPLACE INTO cf_details (account_id, profile_id, date, net, cf, total_credit, total_debit)
       SELECT
         coalesce(new.from_account, new.to_account),
         1,
         substr(new.date, 1, 7),
+        coalesce((SELECT sum(case when type = 0 then amount else -amount end)
+          FROM transaction_table t
+          WHERE t.date LIKE substr(new.date, 1, 7) || '%'
+          AND (from_account = coalesce(new.from_account, new.to_account)
+            OR to_account = coalesce(new.from_account, new.to_account))), 0),
         coalesce((SELECT sum(case when type = 0 then amount else -amount end)
           FROM transaction_table t
           WHERE t.date LIKE substr(new.date, 1, 7) || '%'
@@ -2080,35 +2103,34 @@ async function exportSQLiteBackup(){
     // Build ID maps (PWA ID → SQLite ID)
     const catMap={},accMap={};
 
-    // Export categories with Android schema
+    // Export categories - category_type as INT (default to 0)
     for(const c of cats){
-      db2.run('INSERT INTO category_table (category_id, category_name, category_type, is_custom_category) VALUES (?, ?, ?, ?)',[c.id,c.name,'default',0]);
+      db2.run('INSERT INTO category_table (category_id, category_name, category_type, is_custom_category) VALUES (?, ?, ?, ?)',
+        [c.id, c.name, 0, 0]);
       catMap[c.id]=c.id;
     }
 
-    // Export accounts with Android schema
+    // Export accounts - default_indicator: map 0→'n', 1→'y'
     for(const a of accounts){
       const color=a.color||'#3b82f6';
-      db2.run('INSERT INTO account (account_id, account_identification, bank_details, account_color, account_balance, profile_id) VALUES (?, ?, ?, ?, ?, ?)',[a.id,'','',color,0,1]);
+      const defaultInd=(a.default?'y':'n');
+      db2.run('INSERT INTO account (account_id, account_identification, bank_details, profile_id, account_balance, default_indicator, account_color) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [a.id, '', '', 1, 0, defaultInd, color]);
       accMap[a.id]=a.id;
     }
 
-    // Export transactions with Android schema
-    // PWA: {date, amount, type:'income'|'expense', description, category, account, note}
-    // Android: {date, name, description, amount×10000, type:0=income/1=expense, category_id, from_account, to_account, other_bank_indicator}
+    // Export transactions - preserve original transaction_id, convert type to 0/1
     for(const t of txns){
       const isIncome=t.type==='income';
       const androidType=isIncome?0:1;
-      const amountInt=Math.round((t.amount||0)*10000);
+      const amountInt=Math.round((t.amount||0)*100); // BIGINT amount in cents
       const catId=catMap[t.category]||1;
-      // For income: to_account=target, from_account=null
-      // For expense: from_account=source, to_account=null
       const fromAcc=isIncome?null:(accMap[t.account]||1);
       const toAcc=isIncome?(accMap[t.account]||1):null;
-      db2.run(
-        'INSERT INTO transaction_table (date, name, description, amount, type, category_id, from_account, to_account, other_bank_indicator) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [t.date, t.description||'', t.note||'', amountInt, androidType, catId, fromAcc, toAcc, 0]
-      );
+      const txnId=t.id||Math.floor(Math.random()*1000000); // Use PWA ID if available
+
+      db2.run('INSERT INTO transaction_table (date, name, amount, category_id, description, from_account, to_account, other_bank_indicator, transaction_id, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [t.date, t.description||'', amountInt, catId, t.note||'', fromAcc, toAcc, 'n', txnId, androidType]);
     }
 
     // Export the database as a file
@@ -2157,6 +2179,23 @@ const GDRIVE_CONFIG={
 };
 let _gdriveToken=null,_driveFolderId=null,_tokenClient=null;
 
+// Session storage keys
+const GDRIVE_STORAGE={
+  TOKEN:'gdrive_token',
+  FOLDER_ID:'gdrive_folder_id'
+};
+
+// Restore GDrive session from storage on page load
+function gdriveRestoreSession(){
+  const storedToken=sessionStorage.getItem(GDRIVE_STORAGE.TOKEN);
+  const storedFolderId=sessionStorage.getItem(GDRIVE_STORAGE.FOLDER_ID);
+  if(storedToken){
+    _gdriveToken=storedToken;
+    _driveFolderId=storedFolderId;
+    updateGDriveUI();
+  }
+}
+
 async function gdriveInit(){
   if(!window.google){
     await new Promise((resolve,reject)=>{
@@ -2169,6 +2208,8 @@ async function gdriveInit(){
       document.head.appendChild(script);
     });
   }
+  // Restore session after GIS is loaded
+  gdriveRestoreSession();
 }
 
 async function gdriveLogin(){
@@ -2181,6 +2222,8 @@ async function gdriveLogin(){
         callback:(response)=>{
           if(response.access_token){
             _gdriveToken=response.access_token;
+            // Store token in session storage
+            sessionStorage.setItem(GDRIVE_STORAGE.TOKEN, _gdriveToken);
           }
         }
       });
@@ -2200,6 +2243,10 @@ async function gdriveLogin(){
     }
 
     await gdriveFindFolder();
+    // Store folder ID in session storage
+    if(_driveFolderId){
+      sessionStorage.setItem(GDRIVE_STORAGE.FOLDER_ID, _driveFolderId);
+    }
     toast('Google Drive connected ✓');
     updateGDriveUI();
   }catch(e){
@@ -2328,63 +2375,100 @@ async function gdriveUploadExport(){
     try{SQL=await loadSqlJs();}catch(e){toast('Failed to load SQLite');return;}
     const db2=new SQL.Database();
 
-    // Create tables matching Android schema
+    // Create tables matching Android schema EXACTLY
     db2.run(`CREATE TABLE category_table (
-      category_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      category_name TEXT NOT NULL,
-      category_type TEXT DEFAULT 'default',
-      is_custom_category INTEGER DEFAULT 0
+      category_id INTEGER PRIMARY KEY,
+      category_name string,
+      category_type INT,
+      is_custom_category INT
     )`);
+
     db2.run(`CREATE TABLE account (
-      account_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      account_identification TEXT DEFAULT '',
-      bank_details TEXT DEFAULT '',
-      account_color TEXT DEFAULT '#3b82f6',
-      account_balance INTEGER DEFAULT 0,
-      profile_id INTEGER DEFAULT 1,
-      FOREIGN KEY(profile_id) REFERENCES profile(profile_id)
+      account_id INTEGER PRIMARY KEY,
+      account_identification string,
+      bank_details string,
+      profile_id INT,
+      account_balance bigint,
+      default_indicator string,
+      account_color string
     )`);
+
     db2.run(`CREATE TABLE transaction_table (
-      transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL,
-      name TEXT,
-      description TEXT,
-      amount INTEGER NOT NULL,
-      type INTEGER NOT NULL,
+      date String,
+      name string,
+      amount bigint,
       category_id INTEGER,
-      from_account INTEGER,
-      to_account INTEGER,
-      other_bank_indicator INTEGER DEFAULT 0,
-      FOREIGN KEY(category_id) REFERENCES category_table(category_id),
-      FOREIGN KEY(from_account) REFERENCES account(account_id),
-      FOREIGN KEY(to_account) REFERENCES account(account_id)
+      description string,
+      from_account INT,
+      to_account INT,
+      other_bank_indicator string,
+      transaction_id INTEGER,
+      type INT,
+      PRIMARY KEY(date, transaction_id)
     )`);
+
     db2.run(`CREATE TABLE profile (
-      profile_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      profile_name TEXT DEFAULT 'Default',
-      profile_purpose TEXT DEFAULT '',
-      additional_information TEXT DEFAULT '',
-      profile_avathar TEXT DEFAULT '',
-      default_indicator INTEGER DEFAULT 1
+      profile_id INTEGER PRIMARY KEY,
+      profile_name string,
+      profile_purpose string,
+      additional_information string,
+      default_indicator string,
+      profile_avathar string
     )`);
-    db2.run(`INSERT INTO profile (profile_id, profile_name, default_indicator) VALUES (1, 'Default', 1)`);
+
+    db2.run('INSERT INTO profile (profile_id, profile_name, profile_purpose, additional_information, default_indicator, profile_avathar) VALUES (?, ?, ?, ?, ?, ?)',
+      [1, 'Default', '', '', 'y', '']);
+
     db2.run(`CREATE TABLE android_metadata (locale TEXT)`);
     db2.run(`INSERT INTO android_metadata (locale) VALUES ('en_IN')`);
 
-    // Insert data
+    db2.run(`CREATE TABLE notes (
+      date string,
+      text string,
+      _id INT
+    )`);
+
+    db2.run(`CREATE TABLE cf_details (
+      cf_id INTEGER PRIMARY KEY,
+      date String,
+      profile_id INTEGER,
+      account_id INTEGER,
+      net bigint,
+      cf bigint,
+      total_credit bigint,
+      total_debit bigint
+    )`);
+
+    // Insert data - categories
+    const catMap={};
     for(const c of cats){
-      db2.run('INSERT INTO category_table (category_id, category_name, category_type, is_custom_category) VALUES (?, ?, ?, ?)',[c.id,c.name,'default',0]);
+      db2.run('INSERT INTO category_table (category_id, category_name, category_type, is_custom_category) VALUES (?, ?, ?, ?)',
+        [c.id, c.name, 0, 0]);
+      catMap[c.id]=c.id;
     }
+
+    // Insert data - accounts (default_indicator: 0→'n', 1→'y')
+    const accMap={};
     for(const a of accounts){
       const color=a.color||'#3b82f6';
-      db2.run('INSERT INTO account (account_id, account_identification, bank_details, account_color, account_balance, profile_id) VALUES (?, ?, ?, ?, ?, ?)',[a.id,'','',color,0,1]);
+      const defaultInd=(a.default?'y':'n');
+      db2.run('INSERT INTO account (account_id, account_identification, bank_details, profile_id, account_balance, default_indicator, account_color) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [a.id, '', '', 1, 0, defaultInd, color]);
+      accMap[a.id]=a.id;
     }
+
+    // Insert data - transactions (preserve original transaction_id, convert type to 0/1)
     for(const t of txns){
       const isIncome=t.type==='income';
       const androidType=isIncome?0:1;
-      const amountInt=Math.round((t.amount||0)*10000);
-      db2.run('INSERT INTO transaction_table (date, name, description, amount, type, category_id, from_account, to_account, other_bank_indicator) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [t.date, t.description||'', t.note||'', amountInt, androidType, t.category||1, isIncome?null:t.account, isIncome?t.account:null, 0]);
+      const amountInt=Math.round((t.amount||0)*100); // BIGINT amount in cents
+      const catId=catMap[t.category]||1;
+      const fromAcc=isIncome?null:(accMap[t.account]||1);
+      const toAcc=isIncome?(accMap[t.account]||1):null;
+      const txnId=t.id||Math.floor(Math.random()*1000000);
+
+      db2.run('INSERT INTO transaction_table (date, name, amount, category_id, description, from_account, to_account, other_bank_indicator, transaction_id, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [t.date, t.description||'', amountInt, catId, t.note||'', fromAcc, toAcc, 'n', txnId, androidType]);
     }
 
     const data=db2.export();
@@ -2450,6 +2534,16 @@ function updateGDriveUI(){
   }
 }
 
+// Logout from Google Drive and clear session
+function gdriveLogout(){
+  _gdriveToken=null;
+  _driveFolderId=null;
+  sessionStorage.removeItem(GDRIVE_STORAGE.TOKEN);
+  sessionStorage.removeItem(GDRIVE_STORAGE.FOLDER_ID);
+  updateGDriveUI();
+  toast('Google Drive disconnected');
+}
+
 async function importBackupSQLite(file){
   const buf=await file.arrayBuffer();
   let SQL;
@@ -2493,7 +2587,7 @@ async function importBackupSQLite(file){
         await dbPut('txns',{
           id:txn.transaction_id,
           date:txn.date,
-          amount:txn.amount/10000,
+          amount:txn.amount/100,
           type:txn.type===0?'income':'expense',
           description:txn.name||'',
           category:txn.category_id,
@@ -3003,6 +3097,9 @@ function buildSettings(){
         <div class="set-item" onclick="gdriveShowRestoreList()">
           <div class="set-left"><div class="set-icon" style="background:#f59e0b20">📥</div><div><div class="set-name">Restore from Drive</div><div class="set-sub">List & download saved backups</div></div></div><div style="color:var(--text3)">›</div>
         </div>
+        <div class="set-item" onclick="gdriveLogout()" style="border-left:3px solid var(--text3)">
+          <div class="set-left"><div class="set-icon" style="background:#ef444420">🔗</div><div><div class="set-name">Disconnect Google Drive</div><div class="set-sub">Sign out & clear session</div></div></div><div style="color:var(--text3)">›</div>
+        </div>
       </div>
     </div>
 
@@ -3033,11 +3130,59 @@ function buildSettings(){
       </div>
     </div>
 
+    <div class="set-section">
+      <div class="set-title">Danger Zone</div>
+      <div class="set-item" onclick="resetAccount()" style="border-left:3px solid var(--danger)">
+        <div class="set-left"><div class="set-icon" style="background:#ef444420">🔄</div><div><div class="set-name">Reset Account</div><div class="set-sub">Delete all data & restore to default setup</div></div></div><div style="color:var(--text3)">›</div>
+      </div>
+    </div>
+
     <div style="text-align:center;padding:24px 0 8px;color:var(--text3);font-size:12px">
       Paisa v5.0 · All data stored locally on your device 🔒
     </div>`;
   updateInstallUI();
   updateGDriveUI();
+}
+
+// Account Reset
+async function resetAccount(){
+  const confirmed=confirm('⚠️ WARNING: This will DELETE ALL your data!\n\n✓ All transactions will be deleted\n✓ All custom accounts & categories will be deleted\n✓ App will reset to default setup\n\nThis action CANNOT be undone.\n\nAre you sure?');
+  if(!confirmed)return;
+
+  const doubleConfirm=prompt('Type "RESET" to confirm (case-sensitive):');
+  if(doubleConfirm!=='RESET'){
+    toast('Reset cancelled');
+    return;
+  }
+
+  try{
+    toast('Resetting account...');
+    // Clear all data
+    await dbClear('txns');
+    await dbClear('accounts');
+    await dbClear('cats');
+    await dbClear('mappings');
+
+    // Restore defaults
+    for(const a of DEF_ACCOUNTS)await dbPut('accounts',a);
+    for(const c of DEF_CATS)await dbPut('cats',c);
+
+    // Clear mappings
+    paidByMappings={};
+    await saveMappings();
+
+    // Reload everything
+    txns=[];
+    accounts=await dbAll('accounts');
+    cats=await dbAll('cats');
+    renderAll();
+    buildSettings();
+
+    toast('Account reset to default ✓');
+  }catch(e){
+    console.error('Reset error:',e);
+    toast('Reset failed: '+e.message);
+  }
 }
 
 // PhonePe mapping management
