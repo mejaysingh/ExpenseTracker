@@ -1926,19 +1926,24 @@ async function exportSQLiteBackup(){
   try{SQL=await loadSqlJs();}catch(e){toast('Failed to load SQLite — check internet');return;}
   const db2=new SQL.Database();
   try{
-    // Create tables matching Android "Day-to-Day Expenses" schema
+    // Create tables matching Android "Day-to-Day Expenses" schema EXACTLY
     db2.run(`CREATE TABLE category_table (
-      _id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL
+      category_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category_name TEXT NOT NULL,
+      category_type TEXT DEFAULT 'default',
+      is_custom_category INTEGER DEFAULT 0
     )`);
     db2.run(`CREATE TABLE account (
-      _id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      color TEXT DEFAULT '#3b82f6',
-      balance INTEGER DEFAULT 0
+      account_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_identification TEXT DEFAULT '',
+      bank_details TEXT DEFAULT '',
+      account_color TEXT DEFAULT '#3b82f6',
+      account_balance INTEGER DEFAULT 0,
+      profile_id INTEGER DEFAULT 1,
+      FOREIGN KEY(profile_id) REFERENCES profile(profile_id)
     )`);
     db2.run(`CREATE TABLE transaction_table (
-      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
       date TEXT NOT NULL,
       name TEXT,
       description TEXT,
@@ -1947,15 +1952,20 @@ async function exportSQLiteBackup(){
       category_id INTEGER,
       from_account INTEGER,
       to_account INTEGER,
-      FOREIGN KEY(category_id) REFERENCES category_table(_id),
-      FOREIGN KEY(from_account) REFERENCES account(_id),
-      FOREIGN KEY(to_account) REFERENCES account(_id)
+      other_bank_indicator INTEGER DEFAULT 0,
+      FOREIGN KEY(category_id) REFERENCES category_table(category_id),
+      FOREIGN KEY(from_account) REFERENCES account(account_id),
+      FOREIGN KEY(to_account) REFERENCES account(account_id)
     )`);
     db2.run(`CREATE TABLE profile (
-      _id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT DEFAULT 'Default'
+      profile_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_name TEXT DEFAULT 'Default',
+      profile_purpose TEXT DEFAULT '',
+      additional_information TEXT DEFAULT '',
+      profile_avathar TEXT DEFAULT '',
+      default_indicator INTEGER DEFAULT 1
     )`);
-    db2.run(`INSERT INTO profile (name) VALUES ('Default')`);
+    db2.run(`INSERT INTO profile (profile_id, profile_name, default_indicator) VALUES (1, 'Default', 1)`);
 
     // android_metadata table (required by Android SQLite)
     db2.run(`CREATE TABLE android_metadata (locale TEXT)`);
@@ -1963,31 +1973,33 @@ async function exportSQLiteBackup(){
 
     // notes table
     db2.run(`CREATE TABLE notes (
-      _id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT,
-      content TEXT,
-      date TEXT,
-      color TEXT DEFAULT '#ffffff'
+      notes_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      text TEXT,
+      profile_id INTEGER DEFAULT 1,
+      FOREIGN KEY(profile_id) REFERENCES profile(profile_id)
     )`);
 
-    // cf_details table for cash flow tracking
+    // cf_details table for cash flow tracking with profile_id
     db2.run(`CREATE TABLE cf_details (
+      cf_id INTEGER PRIMARY KEY AUTOINCREMENT,
       account_id INTEGER NOT NULL,
+      profile_id INTEGER DEFAULT 1,
       date TEXT NOT NULL,
       net INTEGER DEFAULT 0,
       cf INTEGER DEFAULT 0,
       total_credit INTEGER DEFAULT 0,
       total_debit INTEGER DEFAULT 0,
-      PRIMARY KEY(account_id, date),
-      FOREIGN KEY(account_id) REFERENCES account(_id)
+      FOREIGN KEY(account_id) REFERENCES account(account_id),
+      FOREIGN KEY(profile_id) REFERENCES profile(profile_id)
     )`);
 
     // Triggers to maintain cf_details on transaction changes
     db2.run(`CREATE TRIGGER trigger_cf_update_on_insert AFTER INSERT ON transaction_table
     BEGIN
-      INSERT OR REPLACE INTO cf_details (account_id, date, net, total_credit, total_debit)
+      INSERT OR REPLACE INTO cf_details (account_id, profile_id, date, net, total_credit, total_debit)
       SELECT
         coalesce(new.from_account, new.to_account),
+        1,
         substr(new.date, 1, 7),
         coalesce((SELECT sum(case when type = 0 then amount else -amount end)
           FROM transaction_table t
@@ -2021,6 +2033,7 @@ async function exportSQLiteBackup(){
           WHERE t.date LIKE substr(old.date, 1, 7) || '%'
           AND from_account = coalesce(old.from_account, old.to_account)), 0)
       WHERE account_id = coalesce(old.from_account, old.to_account)
+        AND profile_id = 1
         AND date = substr(old.date, 1, 7);
       DELETE FROM cf_details WHERE net = 0 AND total_credit = 0 AND total_debit = 0;
     END`);
@@ -2042,10 +2055,12 @@ async function exportSQLiteBackup(){
           WHERE t.date LIKE substr(old.date, 1, 7) || '%'
           AND from_account = coalesce(old.from_account, old.to_account)), 0)
       WHERE account_id = coalesce(old.from_account, old.to_account)
+        AND profile_id = 1
         AND date = substr(old.date, 1, 7);
-      INSERT OR REPLACE INTO cf_details (account_id, date, net, total_credit, total_debit)
+      INSERT OR REPLACE INTO cf_details (account_id, profile_id, date, net, total_credit, total_debit)
       SELECT
         coalesce(new.from_account, new.to_account),
+        1,
         substr(new.date, 1, 7),
         coalesce((SELECT sum(case when type = 0 then amount else -amount end)
           FROM transaction_table t
@@ -2065,22 +2080,22 @@ async function exportSQLiteBackup(){
     // Build ID maps (PWA ID → SQLite ID)
     const catMap={},accMap={};
 
-    // Export categories
+    // Export categories with Android schema
     for(const c of cats){
-      db2.run('INSERT INTO category_table (_id, name) VALUES (?, ?)',[c.id,c.name]);
+      db2.run('INSERT INTO category_table (category_id, category_name, category_type, is_custom_category) VALUES (?, ?, ?, ?)',[c.id,c.name,'default',0]);
       catMap[c.id]=c.id;
     }
 
-    // Export accounts
+    // Export accounts with Android schema
     for(const a of accounts){
       const color=a.color||'#3b82f6';
-      db2.run('INSERT INTO account (_id, name, color, balance) VALUES (?, ?, ?, ?)',[a.id,a.name,color,0]);
+      db2.run('INSERT INTO account (account_id, account_identification, bank_details, account_color, account_balance, profile_id) VALUES (?, ?, ?, ?, ?, ?)',[a.id,'','',color,0,1]);
       accMap[a.id]=a.id;
     }
 
-    // Export transactions
+    // Export transactions with Android schema
     // PWA: {date, amount, type:'income'|'expense', description, category, account, note}
-    // Android: {date, name, description, amount×10000, type:0=income/1=expense, category_id, from_account, to_account}
+    // Android: {date, name, description, amount×10000, type:0=income/1=expense, category_id, from_account, to_account, other_bank_indicator}
     for(const t of txns){
       const isIncome=t.type==='income';
       const androidType=isIncome?0:1;
@@ -2091,8 +2106,8 @@ async function exportSQLiteBackup(){
       const fromAcc=isIncome?null:(accMap[t.account]||1);
       const toAcc=isIncome?(accMap[t.account]||1):null;
       db2.run(
-        'INSERT INTO transaction_table (date, name, description, amount, type, category_id, from_account, to_account) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [t.date, t.description||'', t.note||'', amountInt, androidType, catId, fromAcc, toAcc]
+        'INSERT INTO transaction_table (date, name, description, amount, type, category_id, from_account, to_account, other_bank_indicator) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [t.date, t.description||'', t.note||'', amountInt, androidType, catId, fromAcc, toAcc, 0]
       );
     }
 
@@ -2131,6 +2146,353 @@ async function importBackup(file){
   }
   txns=await dbAll('txns');accounts=await dbAll('accounts');cats=await dbAll('cats');
   renderAll();buildSettings();toast(`Restored ${txns.length} transactions ✓`);
+}
+
+// ═══════════════════════════════════════
+// GOOGLE DRIVE INTEGRATION
+// ═══════════════════════════════════════
+const GDRIVE_CONFIG={
+  CLIENT_ID:'611542625239-bkg97pun51ag23vrl5vu37rfebmtb9h0.apps.googleusercontent.com',
+  SCOPES:'https://www.googleapis.com/auth/drive.file',
+  FOLDER_NAME:'BackUp-Day-To-Day Expenses'
+};
+let _gdriveAuth=null,_driveFolderId=null;
+
+async function gdriveInit(){
+  if(!window.gapi){
+    await new Promise((resolve,reject)=>{
+      const script=document.createElement('script');
+      script.src='https://apis.google.com/js/api.js';
+      script.onload=resolve;
+      script.onerror=reject;
+      document.head.appendChild(script);
+    });
+  }
+  return new Promise((resolve,reject)=>{
+    gapi.load('client:auth2',()=>{
+      gapi.client.init({
+        clientId:GDRIVE_CONFIG.CLIENT_ID,
+        scope:GDRIVE_CONFIG.SCOPES,
+        discoveryDocs:['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest']
+      }).then(resolve).catch(reject);
+    });
+  });
+}
+
+async function gdriveLogin(){
+  try{
+    await gdriveInit();
+    const auth=gapi.auth2.getAuthInstance();
+    if(!auth.isSignedIn.get()){
+      await auth.signIn();
+    }
+    _gdriveAuth=auth;
+    await gdriveFindFolder();
+    toast('Google Drive connected ✓');
+  }catch(e){
+    console.error('GDrive login:',e);
+    toast('Failed to connect Google Drive');
+  }
+}
+
+async function gdriveFindFolder(){
+  try{
+    const res=await gapi.client.drive.files.list({
+      q:`name='${GDRIVE_CONFIG.FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      spaces:'drive',
+      fields:'files(id,name)',
+      pageSize:1
+    });
+    if(res.result.files.length>0){
+      _driveFolderId=res.result.files[0].id;
+    }else{
+      _driveFolderId=await gdriveCreateFolder();
+    }
+  }catch(e){
+    console.error('Find folder:',e);
+    throw e;
+  }
+}
+
+async function gdriveCreateFolder(){
+  try{
+    const res=await gapi.client.drive.files.create({
+      resource:{
+        name:GDRIVE_CONFIG.FOLDER_NAME,
+        mimeType:'application/vnd.google-apps.folder'
+      },
+      fields:'id'
+    });
+    return res.result.id;
+  }catch(e){
+    console.error('Create folder:',e);
+    throw e;
+  }
+}
+
+async function gdriveListBackups(){
+  if(!_gdriveAuth||!_driveFolderId){
+    toast('Please connect Google Drive first');
+    return [];
+  }
+  try{
+    const res=await gapi.client.drive.files.list({
+      q:`'${_driveFolderId}' in parents and name contains 'day-to-day-expenses' and trashed=false`,
+      spaces:'drive',
+      fields:'files(id,name,createdTime,size)',
+      orderBy:'createdTime desc',
+      pageSize:50
+    });
+    return res.result.files||[];
+  }catch(e){
+    console.error('List backups:',e);
+    toast('Failed to list backups');
+    return [];
+  }
+}
+
+async function gdriveDownloadBackup(fileId){
+  if(!_gdriveAuth){
+    toast('Not connected to Google Drive');
+    return;
+  }
+  try{
+    toast('Downloading backup...');
+    const res=await gapi.client.drive.files.get({
+      fileId:fileId,
+      alt:'media'
+    });
+    const blob=new Blob([res.body],{type:'application/octet-stream'});
+    const file=new File([blob],'backup.db');
+    await importBackupSQLite(file);
+  }catch(e){
+    console.error('Download backup:',e);
+    toast('Failed to download backup');
+  }
+}
+
+async function gdriveUploadBackup(blob,filename){
+  if(!_gdriveAuth||!_driveFolderId){
+    toast('Please connect Google Drive first');
+    return;
+  }
+  try{
+    toast('Uploading backup to Drive...');
+    const metadata={
+      name:filename||`day-to-day-expenses_${new Date().toISOString().split('T')[0]}.db`,
+      parents:[_driveFolderId]
+    };
+    const form=new FormData();
+    form.append('metadata',new Blob([JSON.stringify(metadata)],{type:'application/json'}));
+    form.append('file',blob);
+    const res=await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',{
+      method:'POST',
+      headers:{'Authorization':`Bearer ${gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token}`},
+      body:form
+    });
+    if(!res.ok)throw new Error(res.statusText);
+    toast('Backup uploaded to Google Drive ✓');
+  }catch(e){
+    console.error('Upload backup:',e);
+    toast('Failed to upload backup');
+  }
+}
+
+async function gdriveUploadExport(){
+  if(!_gdriveAuth){
+    toast('Please connect Google Drive first');
+    return;
+  }
+  if(!txns.length){
+    toast('No transactions to backup');
+    return;
+  }
+  try{
+    toast('Creating backup...');
+    let SQL;
+    try{SQL=await loadSqlJs();}catch(e){toast('Failed to load SQLite');return;}
+    const db2=new SQL.Database();
+
+    // Create tables matching Android schema
+    db2.run(`CREATE TABLE category_table (
+      category_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category_name TEXT NOT NULL,
+      category_type TEXT DEFAULT 'default',
+      is_custom_category INTEGER DEFAULT 0
+    )`);
+    db2.run(`CREATE TABLE account (
+      account_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_identification TEXT DEFAULT '',
+      bank_details TEXT DEFAULT '',
+      account_color TEXT DEFAULT '#3b82f6',
+      account_balance INTEGER DEFAULT 0,
+      profile_id INTEGER DEFAULT 1,
+      FOREIGN KEY(profile_id) REFERENCES profile(profile_id)
+    )`);
+    db2.run(`CREATE TABLE transaction_table (
+      transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL,
+      name TEXT,
+      description TEXT,
+      amount INTEGER NOT NULL,
+      type INTEGER NOT NULL,
+      category_id INTEGER,
+      from_account INTEGER,
+      to_account INTEGER,
+      other_bank_indicator INTEGER DEFAULT 0,
+      FOREIGN KEY(category_id) REFERENCES category_table(category_id),
+      FOREIGN KEY(from_account) REFERENCES account(account_id),
+      FOREIGN KEY(to_account) REFERENCES account(account_id)
+    )`);
+    db2.run(`CREATE TABLE profile (
+      profile_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_name TEXT DEFAULT 'Default',
+      profile_purpose TEXT DEFAULT '',
+      additional_information TEXT DEFAULT '',
+      profile_avathar TEXT DEFAULT '',
+      default_indicator INTEGER DEFAULT 1
+    )`);
+    db2.run(`INSERT INTO profile (profile_id, profile_name, default_indicator) VALUES (1, 'Default', 1)`);
+    db2.run(`CREATE TABLE android_metadata (locale TEXT)`);
+    db2.run(`INSERT INTO android_metadata (locale) VALUES ('en_IN')`);
+
+    // Insert data
+    for(const c of cats){
+      db2.run('INSERT INTO category_table (category_id, category_name, category_type, is_custom_category) VALUES (?, ?, ?, ?)',[c.id,c.name,'default',0]);
+    }
+    for(const a of accounts){
+      const color=a.color||'#3b82f6';
+      db2.run('INSERT INTO account (account_id, account_identification, bank_details, account_color, account_balance, profile_id) VALUES (?, ?, ?, ?, ?, ?)',[a.id,'','',color,0,1]);
+    }
+    for(const t of txns){
+      const isIncome=t.type==='income';
+      const androidType=isIncome?0:1;
+      const amountInt=Math.round((t.amount||0)*10000);
+      db2.run('INSERT INTO transaction_table (date, name, description, amount, type, category_id, from_account, to_account, other_bank_indicator) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [t.date, t.description||'', t.note||'', amountInt, androidType, t.category||1, isIncome?null:t.account, isIncome?t.account:null, 0]);
+    }
+
+    const data=db2.export();
+    const blob=new Blob([data],{type:'application/x-sqlite3'});
+    db2.close();
+
+    await gdriveUploadBackup(blob);
+  }catch(e){
+    console.error('GDrive export:',e);
+    toast('Failed to create backup: '+e.message);
+  }
+}
+
+async function gdriveShowRestoreList(){
+  if(!_gdriveAuth){
+    toast('Please connect Google Drive first');
+    return;
+  }
+  const backups=await gdriveListBackups();
+  if(!backups.length){
+    toast('No backups found in Google Drive');
+    return;
+  }
+
+  // Show modal with backup list
+  const modal=document.createElement('div');
+  modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:flex-end;z-index:9999';
+  modal.innerHTML=`
+    <div style="background:var(--surface);width:100%;border-radius:20px 20px 0 0;padding:16px;max-height:70vh;overflow-y:auto;box-shadow:0 -4px 12px rgba(0,0,0,0.3)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;font-weight:600">
+        <div>Restore from Google Drive</div>
+        <button onclick="this.closest('div').parentElement.remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text2)">✕</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${backups.map(b=>`
+          <div style="background:var(--surface2);padding:12px;border-radius:10px;cursor:pointer;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center" onclick="gdriveDownloadBackup('${b.id}');this.closest('div').parentElement.parentElement.remove()">
+            <div>
+              <div style="font-size:13px;font-weight:500">${b.name}</div>
+              <div style="font-size:11px;color:var(--text3)">
+                ${new Date(b.createdTime).toLocaleDateString()} · ${(b.size/1024).toFixed(1)}KB
+              </div>
+            </div>
+            <div style="color:var(--text2)">›</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.onclick=(e)=>{if(e.target===modal)modal.remove()};
+}
+
+// Update UI when authenticated
+function updateGDriveUI(){
+  const loginBtn=document.getElementById('gdrive-login-btn');
+  const actions=document.getElementById('gdrive-actions');
+  if(_gdriveAuth){
+    loginBtn.style.display='none';
+    actions.style.display='block';
+  }
+}
+
+async function importBackupSQLite(file){
+  const buf=await file.arrayBuffer();
+  let SQL;
+  try{SQL=await loadSqlJs();}catch(e){toast('Failed to load SQLite');return;}
+  try{
+    const db=new SQL.Database(new Uint8Array(buf));
+    const tables=db.exec("SELECT name FROM sqlite_master WHERE type='table'");
+    if(!tables.length){toast('Invalid SQLite backup');return;}
+    if(!confirm('Restore from SQLite backup? This replaces all current data.'))return;
+    await dbClear('txns');await dbClear('accounts');await dbClear('cats');
+
+    // Import accounts
+    const accRes=db.exec('SELECT * FROM account');
+    if(accRes.length){
+      const cols=accRes[0].columns;
+      for(const row of accRes[0].values){
+        const acc={};
+        cols.forEach((c,i)=>acc[c]=row[i]);
+        await dbPut('accounts',{id:acc.account_id,name:acc.account_identification||acc.account_id,color:acc.account_color||'#3b82f6'});
+      }
+    }
+
+    // Import categories
+    const catRes=db.exec('SELECT * FROM category_table');
+    if(catRes.length){
+      const cols=catRes[0].columns;
+      for(const row of catRes[0].values){
+        const cat={};
+        cols.forEach((c,i)=>cat[c]=row[i]);
+        await dbPut('cats',{id:cat.category_id,name:cat.category_name});
+      }
+    }
+
+    // Import transactions
+    const txnRes=db.exec('SELECT * FROM transaction_table');
+    if(txnRes.length){
+      const cols=txnRes[0].columns;
+      for(const row of txnRes[0].values){
+        const txn={};
+        cols.forEach((c,i)=>txn[c]=row[i]);
+        await dbPut('txns',{
+          id:txn.transaction_id,
+          date:txn.date,
+          amount:txn.amount/10000,
+          type:txn.type===0?'income':'expense',
+          description:txn.name||'',
+          category:txn.category_id,
+          account:txn.from_account||txn.to_account,
+          note:txn.description||''
+        });
+      }
+    }
+
+    db.close();
+    txns=await dbAll('txns');accounts=await dbAll('accounts');cats=await dbAll('cats');
+    renderAll();buildSettings();
+    toast(`Restored from SQLite backup ✓`);
+  }catch(e){
+    console.error('SQLite import:',e);
+    toast('Import error: '+e.message);
+  }
 }
 
 // ═══════════════════════════════════════
@@ -2612,6 +2974,21 @@ function buildSettings(){
     </div>
 
     <div class="set-section">
+      <div class="set-title">Google Drive Backup</div>
+      <div class="set-item" id="gdrive-login-btn" onclick="gdriveLogin()">
+        <div class="set-left"><div class="set-icon" style="background:#4285f420">☁️</div><div><div class="set-name">Connect Google Drive</div><div class="set-sub">Sign in to backup & restore from Drive</div></div></div><div style="color:var(--text3)">›</div>
+      </div>
+      <div id="gdrive-actions" style="display:none">
+        <div class="set-item" onclick="gdriveUploadExport()">
+          <div class="set-left"><div class="set-icon" style="background:#10b98120">📤</div><div><div class="set-name">Upload Backup to Drive</div><div class="set-sub">Save current data as SQLite backup</div></div></div><div style="color:var(--text3)">›</div>
+        </div>
+        <div class="set-item" onclick="gdriveShowRestoreList()">
+          <div class="set-left"><div class="set-icon" style="background:#f59e0b20">📥</div><div><div class="set-name">Restore from Drive</div><div class="set-sub">List & download saved backups</div></div></div><div style="color:var(--text3)">›</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="set-section">
       <div class="set-title">Bulk Edit Transactions</div>
       <div style="background:var(--surface2);border-radius:10px;padding:12px">
         <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Find & Replace in all transaction descriptions</div>
@@ -2649,6 +3026,7 @@ function buildSettings(){
       Paisa v4.0 · All data stored locally on your device 🔒
     </div>`;
   updateInstallUI();
+  updateGDriveUI();
 }
 
 // PhonePe mapping management
